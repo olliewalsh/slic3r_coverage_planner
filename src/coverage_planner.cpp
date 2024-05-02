@@ -376,6 +376,16 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         ROS_INFO_STREAM("Starting Fill. Poly size:" << surface.expolygon.contour.points.size());
 
         Slic3r::Polylines lines = fill->fill_surface(surface);
+        for (int i = 0; i < lines.size(); i++) {
+            while (lines[i].length() > scale_(500) && lines[i].points.size() > 3 ) {
+                // TODO: split on long straight line
+                int split_index = int(lines[i].points.size() / 2);
+                Polyline a, b;
+                lines[i].split_at(lines[i].points[split_index], &a, &b);
+                lines[i] = a;
+                lines.insert(lines.begin()+i+1, b);
+            }
+        }
         append_to(fill_lines, lines);
         delete fill;
         fill = nullptr;
