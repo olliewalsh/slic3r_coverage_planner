@@ -466,6 +466,8 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
             }
             ROS_INFO_STREAM("Got " << equally_spaced_points.size() << " points");
 
+            path.outline_start_index.push_back(path.path.poses.size());
+
             areaLastPoint = nullptr;
             for (auto &pt: equally_spaced_points) {
                 if (areaLastPoint == nullptr) {
@@ -635,9 +637,15 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
             pose.pose.position.z = 0;
             path.path.poses.push_back(pose);
 
+            path.outline_start_index.push_back(path.path.poses.size());
+
         }
         // Reverse here to make the mower approach the obstacle instead of starting close to the obstacle
         std::reverse(path.path.poses.begin(), path.path.poses.end());
+        for(int i=0; i<path.outline_start_index.size(); i++) {
+            path.outline_start_index[i] = path.path.poses.size() - path.outline_start_index[i];
+        }
+        std::reverse(path.outline_start_index.begin(), path.outline_start_index.end());
         res.paths.push_back(path);
     }
 
