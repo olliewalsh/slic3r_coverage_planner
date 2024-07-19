@@ -573,7 +573,8 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         line.remove_duplicate_points();
 
 
-        auto equally_spaced_points = line.equally_spaced_points(scale_(0.1));
+        //auto equally_spaced_points = line.equally_spaced_points(scale_(0.1));
+        auto equally_spaced_points = line.points;
         if (equally_spaced_points.size() < 2) {
             ROS_INFO("Skipping single dot");
             continue;
@@ -599,6 +600,9 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
             pose.pose.position.x = unscale(lastPoint->x);
             pose.pose.position.y = unscale(lastPoint->y);
             pose.pose.position.z = 0;
+            path.path.poses.push_back(pose);
+            pose.pose.position.x = unscale(pt.x);
+            pose.pose.position.y = unscale(pt.y);
             path.path.poses.push_back(pose);
             lastPoint = &pt;
         }
