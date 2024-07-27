@@ -313,6 +313,35 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
     return path;
 }
 
+
+Points sparse_spaced_points(const Polyline &p, double distance)
+{
+    Points points;
+    points.push_back(p.first_point());
+    double len = 0;
+
+    for (Points::const_iterator it = p.points.begin() + 1; it != p.points.end(); ++it) {
+        Line segment(*it, *(it-1));
+        if(segment.length() > (distance * 3)) {
+            points.push_back(segment.point_at(distance*2));
+        }
+        if(segment.length() > (distance)) {
+            points.push_back(segment.point_at(distance));
+        }
+        if(it != points.end()-1){
+            Line next_segment(*it, *(it+1));
+            if(next_segment.length() > (distance * 2)) {
+                points.push_back(next_segment.point_at(distance));
+            }
+            if(next_segment.length() > (distance * 4)) {
+                points.push_back(next_segment.point_at(distance*2));
+            }
+        }
+    }
+    return points;
+}
+
+
 bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_planner::PlanPathResponse &res) {
 
     Slic3r::Polygon outline_poly;
@@ -573,8 +602,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         line.remove_duplicate_points();
 
 
-        //auto equally_spaced_points = line.equally_spaced_points(scale_(0.1));
-        auto equally_spaced_points = line.points;
+        auto equally_spaced_points = sparse_spaced_points(line, scale_(0.025));
         if (equally_spaced_points.size() < 2) {
             ROS_INFO("Skipping single dot");
             continue;
@@ -600,9 +628,6 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
             pose.pose.position.x = unscale(lastPoint->x);
             pose.pose.position.y = unscale(lastPoint->y);
             pose.pose.position.z = 0;
-            path.path.poses.push_back(pose);
-            pose.pose.position.x = unscale(pt.x);
-            pose.pose.position.y = unscale(pt.y);
             path.path.poses.push_back(pose);
             lastPoint = &pt;
         }
