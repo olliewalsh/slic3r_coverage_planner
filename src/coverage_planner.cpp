@@ -337,6 +337,9 @@ Points sparse_spaced_points(const Polyline &p, double distance)
                 points.push_back(next_segment.point_at(distance*2));
             }
         }
+        else {
+            points.push_back(*it);
+        }
     }
     return points;
 }
