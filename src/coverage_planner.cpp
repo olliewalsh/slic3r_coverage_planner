@@ -318,29 +318,23 @@ Points sparse_spaced_points(const Polyline &p, double distance)
 {
     Points points;
     points.push_back(p.first_point());
-    double len = 0;
 
     for (Points::const_iterator it = p.points.begin() + 1; it != p.points.end(); ++it) {
-        Line segment(*it, *(it-1));
-        if(segment.length() > (distance * 3)) {
-            points.push_back(segment.point_at(distance*2));
+        Points right_points;
+        Line segment(*(it-1), *it);
+        int i = 1;
+        double used = 0.0;
+        points.push_back(*(it-1));
+        while( (distance * i + used) < segment.length()/2 )
+        {
+            points.push_back(segment.point_at(distance * i + used));
+            right_points.push_back(segment.point_at(segment.length() - distance * i - used));
+            used += distance * i;
+            i *= 2;
         }
-        if(segment.length() > (distance)) {
-            points.push_back(segment.point_at(distance));
-        }
-        if(it != points.end()-1){
-            Line next_segment(*it, *(it+1));
-            if(next_segment.length() > (distance * 2)) {
-                points.push_back(next_segment.point_at(distance));
-            }
-            if(next_segment.length() > (distance * 4)) {
-                points.push_back(next_segment.point_at(distance*2));
-            }
-        }
-        else {
-            points.push_back(*it);
-        }
+        points.insert(points.end(), right_points.rbegin(), right_points.rend());
     }
+    points.push_back(p.last_point());
     return points;
 }
 
