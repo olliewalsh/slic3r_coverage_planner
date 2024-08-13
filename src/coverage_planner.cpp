@@ -333,7 +333,6 @@ Polyline smooth_polyline(const Polyline &p, double clip_distance){
 Points sparse_spaced_points(const Polyline &p, double distance)
 {
     Points points;
-    points.push_back(p.first_point());
 
     for (Points::const_iterator it = p.points.begin() + 1; it != p.points.end(); ++it) {
         Points right_points;
@@ -606,6 +605,9 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         res.paths.push_back(path);
     }
 
+    double smooth_clip_first_pass = int(950.0*req.distance/3.0)/1000.0;
+    double smooth_clip_second_pass = int(950.0*req.distance/9.0)/1000.0;
+
     for (int i = 0; i < fill_lines.size(); i++) {
         auto &line = fill_lines[i];
         slic3r_coverage_planner::Path path;
@@ -614,7 +616,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
         line.remove_duplicate_points();
 
-        line = smooth_polyline(smooth_polyline(line, scale_(0.05)), scale_(0.025));
+        line = smooth_polyline(smooth_polyline(line, scale_(smooth_clip_first_pass)), scale_(smooth_clip_second_pass));
 
         auto equally_spaced_points = sparse_spaced_points(line, scale_(0.025));
         if (equally_spaced_points.size() < 2) {
