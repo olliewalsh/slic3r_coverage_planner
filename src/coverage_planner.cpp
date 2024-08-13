@@ -313,6 +313,22 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
     return path;
 }
 
+Polyline smooth_polyline(const Polyline &p, double clip_distance){
+    if (p.points.size() < 3) return p;
+    Polyline poly;
+    poly.append(p.first_point());
+    for (Points::const_iterator it = p.points.begin() + 1; it != p.points.end(); ++it) {
+        Line segment(*(it-1), *it);
+        if (segment.length() >= clip_distance * 3) {
+            poly.append(segment.point_at(clip_distance));
+            poly.append(segment.point_at(segment.length() - clip_distance));
+        } else {
+            poly.append(segment.point_at(segment.length()/2.0));
+        }
+    }
+    poly.append(p.last_point());
+    return poly;
+}
 
 Points sparse_spaced_points(const Polyline &p, double distance)
 {
@@ -598,6 +614,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
         line.remove_duplicate_points();
 
+        line = smooth_polyline(smooth_polyline(line, scale_(0.05)), scale_(0.025));
 
         auto equally_spaced_points = sparse_spaced_points(line, scale_(0.025));
         if (equally_spaced_points.size() < 2) {
