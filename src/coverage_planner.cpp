@@ -559,6 +559,15 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     Point areaLastPoint;
     for (auto &group: area_outlines) {
         auto path = determinePathForOutline(header, outline_poly, group, false, &areaLastPoint);
+        // Rotate last point 90 degrees
+        {
+            tf2::Quaternion q_orig, q_rot, q_new;
+            tf2::convert(path.path.poses.back().pose.orientation, q_orig);
+            q_rot.setRPY(0, 0, 3.14159/2.0);
+            q_new = q_rot*q_orig;
+            q_new.normalize();
+            tf2::convert(q_new, path.path.poses.back().pose.orientation);
+        }
         res.paths.push_back(path);
     }
 
@@ -602,6 +611,15 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         // Reverse here to make the mower approach the obstacle instead of starting close to the obstacle
         auto path = determinePathForOutline(header, outline_poly, group, true, nullptr);
         std::reverse(path.path.poses.begin(), path.path.poses.end());
+        // Rotate last point 90 degrees
+        {
+            tf2::Quaternion q_orig, q_rot, q_new;
+            tf2::convert(path.path.poses.back().pose.orientation, q_orig);
+            q_rot.setRPY(0, 0, 3.14159/2.0);
+            q_new = q_rot*q_orig;
+            q_new.normalize();
+            tf2::convert(q_new, path.path.poses.back().pose.orientation);
+        }
         res.paths.push_back(path);
     }
 
