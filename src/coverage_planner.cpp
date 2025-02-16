@@ -23,10 +23,16 @@
 #include "ClipperUtils.hpp"
 #include "ExtrusionEntityCollection.hpp"
 
+#define DEF_POINT_SPACING 0.1
+#define MAX_POINT_SPACING 0.3
+#define MIN_POINT_SPACING 0.08
+
 
 bool visualize_plan;
 ros::Publisher marker_array_publisher;
 
+double transition_distance_m = 0.0;
+bool use_linear_transition = false;
 
 void
 createMarkers(const slic3r_coverage_planner::PlanPathRequest &planning_request,
@@ -211,9 +217,186 @@ void traverse_from_right(std::vector<PerimeterGeneratorLoop> &contours, std::vec
     }
 }
 
+slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, Slic3r::Polygon &outline_poly, Slic3r::Polygons &group, bool isObstacle, Point start_point, Point *areaLastPoint, bool *areaLastPointValid) {
+    slic3r_coverage_planner::Path path;
+
+    /**
+     * Some postprocessing is done here. Until now we just have polygons (just points).
+     * First we convert from the polygon to a set of equally spaced points
+     * Then we search for a suitable start point on the ploygon (first loop near the recording start point and
+     *      subsequent loops near the last split point)
+     * Then we add a transition path to go from of the last polygon and the start of the next.
+     * Finally we can calculate the orientation at each point by looking at the connection line between two points.
+     */
+
+    path.is_outline = true;
+    path.path.header = header;
+
+    Points transition_points;
+    double firstLoopLength = 0.0;
+
+    double transition_length = transition_distance_m; //in m
+    unsigned int num_trans_points = (unsigned int)((transition_length + (DEF_POINT_SPACING/2.0))/DEF_POINT_SPACING);
+    ROS_INFO_STREAM("Interpolated transition, target transition length:"  << transition_length << "m, " << num_trans_points << " points");
+
+    for (int i = 0; i < group.size(); i++) {
+        int used_trans_points = num_trans_points;
+        // The transition path uses the first part of two oconsecutive loops, for best results these should be radially
+        // aligned so adjust the point spacing on subsequent loops, relative to the first one, to ensure this
+        double pointSpacing = DEF_POINT_SPACING;
+        double pathLength = unscale(group[i].length());
+        if(i==0)
+            firstLoopLength = pathLength;
+        else
+            pointSpacing = pointSpacing * (pathLength/firstLoopLength);
+
+        if(pointSpacing > MAX_POINT_SPACING) {
+            ROS_INFO_STREAM("Interpolated transition, point spacing too high:" << pathLength << "m, set to: " << MAX_POINT_SPACING << "m");
+            pointSpacing = MAX_POINT_SPACING;
+        }
+        else if(pointSpacing < MIN_POINT_SPACING) {
+            ROS_INFO_STREAM("Interpolated transition, point spacing too low:" << pathLength << "m, set to: " << MIN_POINT_SPACING << "m");
+            pointSpacing = MIN_POINT_SPACING;
+        }
+
+        auto points = group[i].equally_spaced_points(scale_(pointSpacing));
+
+        if (points.size() < 2) {
+            ROS_INFO("Skipping single dot");
+            continue;
+        }
+        ROS_INFO_STREAM("Got " << points.size() << " points");
+        ROS_INFO_STREAM("Interpolated transition, path length:" << pathLength << "m ,point spacing:" << pointSpacing);
+
+        // Cannot use i==0 here, because we might skip/have skipped a path ("Skipping single dot")
+        if (path.path.poses.empty()) {
+            // innermost group, split at point nearest to recording start/polygon start point
+            double min_start_distance = INFINITY;
+                int min_start_index = 0;
+                for (int start_search = 0; start_search < points.size(); ++start_search) {
+                    const auto &pt = points[start_search];
+                    const auto pt_x = unscale(pt.x);
+                    const auto pt_y = unscale(pt.y);
+                    double distance = sqrt((pt_x - start_point.x) * (pt_x - start_point.x) +
+                                           (pt_y - start_point.y) * (pt_y - start_point.y));
+
+                    if (distance < min_start_distance) {
+                        min_start_distance = distance;
+                        min_start_index = start_search;
+                    }
+                }
+                std::rotate(points.begin(), points.begin() + min_start_index, points.end());
+                used_trans_points = num_trans_points;
+                if(points.size() < used_trans_points) used_trans_points = points.size();
+                transition_points = {points.begin(), points.begin() + used_trans_points};
+                ROS_INFO_STREAM("Interpolated transition, loop: " << i << " ,poly size:" << points.size() << " ,split point:" << min_start_index);
+                ROS_INFO_STREAM("Interpolated transition, used_trans_points:" << used_trans_points);
+
+        } else {
+            // Subsequent loop, find the split point so as to be closest to last split
+            //Note - this isn't ideal on small obstacles, the small raduis means that the points on the
+            //two loops will diverge, it would be better to align on the center of the transtion to minimise this
+            //but not worth the bother as long as the transition length is kept reasonable
+            auto lastPoint = transition_points.front();
+            const auto last_x = unscale(lastPoint.x);
+            const auto last_y = unscale(lastPoint.y);
+            double min_distance = INFINITY;
+            int min_split_index = 0;
+            for (int split_index = 0; split_index < points.size(); ++split_index) {
+                const auto &pt = points[split_index];
+                const auto pt_x = unscale(pt.x);
+                const auto pt_y = unscale(pt.y);
+                double distance = sqrt((pt_x - last_x) * (pt_x - last_x) +
+                                        (pt_y - last_y) * (pt_y - last_y));
+
+                if (distance < min_distance) {
+                    min_distance = distance;
+                    min_split_index = split_index;
+                }
+            }
+
+            // In order to smooth the transition we create a transition path based on the start of the last one and the start of the new one.
+            ROS_INFO_STREAM("Interpolated transition, loop: " << i << " ,poly size:" << points.size() << " ,split point:" << min_split_index);
+            std::rotate(points.begin(), points.begin() + min_split_index, points.end());
+            auto old_transition_points = transition_points;
+
+            used_trans_points = num_trans_points;
+            if((points.size()<used_trans_points) || (old_transition_points.size()<used_trans_points)) {
+                if(points.size() < old_transition_points.size())
+                    used_trans_points = points.size();
+                else
+                    used_trans_points = old_transition_points.size();
+            }
+            transition_points = {points.begin(), points.begin() + used_trans_points};
+            ROS_INFO_STREAM("Interpolated transition, used_trans_points:" << used_trans_points);
+            //calculate transition move and modify start of loop
+            for(int offset=0;offset<used_trans_points;offset++) {
+                double path_pt_x = old_transition_points[offset].x;
+                double path_pt_y = old_transition_points[offset].y;
+                double poly_pt_x = points[offset].x;
+                double poly_pt_y = points[offset].y;
+                Point interpolated_pt{};
+                double factor = 0.0;
+                if(use_linear_transition)
+                    factor = (double)offset/(double)(used_trans_points-1); //linear interpolation, best for long transition lengths
+                else
+                    factor = 1.0 - ((cos(M_PI*((double)offset/(used_trans_points-1))) + 1.0) /2.0); //cosine interpolation, best for short lengths
+                interpolated_pt.x = (factor * (poly_pt_x - path_pt_x)) + path_pt_x;
+                interpolated_pt.y = (factor * (poly_pt_y - path_pt_y)) + path_pt_y;
+                //ROS_INFO_STREAM("X path:" << unscale(path_pt_x) << " ,poly:" << unscale(poly_pt_x) << " ,Interp:" << unscale(interpolated_pt.x));
+                //ROS_INFO_STREAM("Y path:" << unscale(path_pt_y) << " ,poly:" << unscale(poly_pt_y) << " ,Interp:" << unscale(interpolated_pt.y));
+                points[offset] = interpolated_pt;
+            }
+            ROS_INFO_STREAM("Interpolated transition, transition path added");
+        }
+
+        if((i == group.size()-1) && !path.path.poses.empty()) //add transition on last loop but not if only have 1 loop
+            points += transition_points;
+
+        for (auto &pt: points) {
+            if (!*areaLastPointValid) {
+                *areaLastPoint = pt;
+                *areaLastPointValid = true;
+                continue;
+            }
+
+            // Direction for obstacle needs to be inversed compared to area outline, because we will reverse the point order later.
+            auto dir = isObstacle ? *areaLastPoint - pt : pt - *areaLastPoint;
+
+            double orientation = atan2(dir.y, dir.x);
+            tf2::Quaternion q(0.0, 0.0, orientation);
+
+            geometry_msgs::PoseStamped pose;
+            pose.header = header;
+            pose.pose.orientation = tf2::toMsg(q);
+            pose.pose.position.x = unscale(areaLastPoint->x);
+            pose.pose.position.y = unscale(areaLastPoint->y);
+            pose.pose.position.z = 0;
+            path.path.poses.push_back(pose);
+            *areaLastPoint = pt;
+        }
+    }
+    // finally, we add the final pose for "lastPoint" with the same orientation as the last poe
+    geometry_msgs::PoseStamped pose;
+    pose.header = header;
+    pose.pose.orientation = path.path.poses.back().pose.orientation;
+    pose.pose.position.x = unscale(areaLastPoint->x);
+    pose.pose.position.y = unscale(areaLastPoint->y);
+    pose.pose.position.z = 0;
+    path.path.poses.push_back(pose);
+
+    if(isObstacle) {
+        // Reverse here to make the mower approach the obstacle instead of starting close to the obstacle
+        std::reverse(path.path.poses.begin(), path.path.poses.end());
+    }
+    return path;
+}
+
 bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_planner::PlanPathResponse &res) {
 
     Slic3r::Polygon outline_poly;
+    //Slic3r::Point start_point = req.outline.points[0];
+    Slic3r::Point start_point(req.outline.points[0].x, req.outline.points[0].y);
     for (auto &pt: req.outline.points) {
         outline_poly.points.push_back(Point(scale_(pt.x), scale_(pt.y)));
     }
@@ -232,10 +415,6 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
         expoly.holes.push_back(hole_poly);
     }
-
-
-
-
 
     // Results are stored here
     std::vector<Polygons> area_outlines;
@@ -405,127 +584,24 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     header.frame_id = "map";
     header.seq = 0;
 
-    /**
-     * Some postprocessing is done here. Until now we just have polygons (just points), but the ROS
-     * navigation stack requires an orientation for each of those points as well.
-     *
-     * In order to achieve this, we split the polygon at some point to make it into a line with start and end.
-     * Then we can calculate the orientation at each point by looking at the connection line between two points.
-     */
-
     Point areaLastPoint;
+    bool areaLastPointValid = false;
     for (auto &group: area_outlines) {
-        slic3r_coverage_planner::Path path;
-        path.is_outline = true;
-        path.path.header = header;
-
-        for (int i = 0; i < group.size(); i++) {
-            auto &poly = group[i];
-
-
-            // Find an appropriate point to split, this should be close to the last split point,
-            // so that we don't need to traverse a lot.
-            Polyline line;
-            // Cannot use i==0 here, because we might skip a path later ("Skipping single dot")
-            if (path.path.poses.empty()) {
-                // innermost group, split wherever
-                line = poly.split_at_first_point();
-            } else {
-                // Get last point of last group. this is the next inner poly from this point of view
-                const auto &last_pose = path.path.poses.back();
-                // Find the closest point in the current poly and split there
-                double min_distance = INFINITY;
-                int min_split_index = 0;
-                for (int split_index = 0; split_index < poly.points.size(); ++split_index) {
-                    const auto &pt = poly.points[split_index];
-                    const auto pt_x = unscale(pt.x);
-                    const auto pt_y = unscale(pt.y);
-                    double distance = sqrt((pt_x - last_pose.pose.position.x) * (pt_x - last_pose.pose.position.x) +
-                                           (pt_y - last_pose.pose.position.y) * (pt_y - last_pose.pose.position.y));
-
-                    if (distance < min_distance) {
-                        min_distance = distance;
-                        min_split_index = split_index;
-                    }
-                }
-
-                // In order to smooth the transition we skip some points (think spiral movement of the mower).
-                // Check, that the skip did not break the path (cross the outer poly during transition).
-                // If it's fine, use the smoothed path, otherwise use the shortest point to split.
-                int smooth_split_index = (min_split_index + 2) % poly.points.size();
-
-                line = poly.split_at_index(smooth_split_index);
-                const Polygon *next_outer_poly;
-                if (i < group.size() - 1) {
-                    next_outer_poly = &group[i + 1];
-                } else {
-                    // we are in the outermost line, use outline for collision check
-                    next_outer_poly = &outline_poly;
-                }
-                Line connection(line.first_point(),
-                                Point(scale_(last_pose.pose.position.x), scale_(last_pose.pose.position.y)));
-                Point intersection_pt{};
-                if (next_outer_poly->intersection(connection, &intersection_pt)) {
-                    // intersection, we need to split at closest point
-                    line = poly.split_at_index(min_split_index);
-                }
-            }
-            line.remove_duplicate_points();
-
-
-            auto equally_spaced_points = line.equally_spaced_points(scale_(0.1));
-            if (equally_spaced_points.size() < 2) {
-                ROS_INFO("Skipping single dot");
-                continue;
-            }
-            ROS_INFO_STREAM("Got " << equally_spaced_points.size() << " points");
-
-            Point *lastPoint = nullptr;
-            for (auto &pt: equally_spaced_points) {
-                if (lastPoint == nullptr) {
-                    lastPoint = &pt;
-                    continue;
-                }
-
-                // calculate pose for "lastPoint" pointing to current point
-
-                auto dir = pt - *lastPoint;
-                double orientation = atan2(dir.y, dir.x);
-                tf2::Quaternion q(0.0, 0.0, orientation);
-
-                geometry_msgs::PoseStamped pose;
-                pose.header = header;
-                pose.pose.orientation = tf2::toMsg(q);
-                pose.pose.position.x = unscale(lastPoint->x);
-                pose.pose.position.y = unscale(lastPoint->y);
-                pose.pose.position.z = 0;
-                path.path.poses.push_back(pose);
-                lastPoint = &pt;
-            }
-
-            // finally, we add the final pose for "lastPoint" with the same orientation as the last poe
-            geometry_msgs::PoseStamped pose;
-            pose.header = header;
-            pose.pose.orientation = path.path.poses.back().pose.orientation;
-            pose.pose.position.x = unscale(lastPoint->x);
-            pose.pose.position.y = unscale(lastPoint->y);
-            pose.pose.position.z = 0;
-            path.path.poses.push_back(pose);
-
-            areaLastPoint = *lastPoint;
-        }
+        areaLastPointValid = false;
+        auto path = determinePathForOutline(header, outline_poly, group, false, start_point, &areaLastPoint, &areaLastPointValid);
         res.paths.push_back(path);
     }
 
     // The order for 3d printing seems to be to sweep across the X and then up the Y axis
     // which is very inefficient for a mower. Order the holes by distance to the previous end-point instead.
     std::vector<Slic3r::Polygons> ordered_obstacle_outlines;
-    if (obstacle_outlines.size() > 0) {
-        // If no prev point set to the first point in first obstacle
-        // Note: back() polygon is the first (outer) loop
-        auto prev_point = area_outlines.size() > 0 ? &areaLastPoint :
-            &obstacle_outlines.front().back().points.front();
-
+    {
+        auto prev_point = areaLastPoint;
+        if (!areaLastPointValid && obstacle_outlines.size() > 0) {
+            // If no prev point set to the first point in first obstacle
+            // Note: back() polygon is the first (outer) loop
+            prev_point = obstacle_outlines.front().back().points.front();
+        }
         while (obstacle_outlines.size()) {
             // Sort be desc distance then pop closest outline from the back of the vector
             std::sort(obstacle_outlines.begin(), obstacle_outlines.end(),
@@ -533,20 +609,20 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
                           // Note: back() polygon is the first (outer) loop
                           auto a_firstPoint = a.back().points.front();
                           double distance_a = sqrt(
-                                  (a_firstPoint.x - prev_point->x) * (a_firstPoint.x - prev_point->x) +
-                                  (a_firstPoint.y - prev_point->y) * (a_firstPoint.y - prev_point->y)
+                                  (a_firstPoint.x - prev_point.x) * (a_firstPoint.x - prev_point.x) +
+                                  (a_firstPoint.y - prev_point.y) * (a_firstPoint.y - prev_point.y)
                           );
                           auto b_firstPoint = b.back().points.front();
                           double distance_b = sqrt(
-                                  (b_firstPoint.x - prev_point->x) * (b_firstPoint.x - prev_point->x) +
-                                  (b_firstPoint.y - prev_point->y) * (b_firstPoint.y - prev_point->y)
+                                  (b_firstPoint.x - prev_point.x) * (b_firstPoint.x - prev_point.x) +
+                                  (b_firstPoint.y - prev_point.y) * (b_firstPoint.y - prev_point.y)
                           );
                           return distance_a >= distance_b;
                       });
             ordered_obstacle_outlines.push_back(obstacle_outlines.back());
             obstacle_outlines.pop_back();
             // Note: front() polygon is the last (inner) loop
-            prev_point = &ordered_obstacle_outlines.back().front().points.back();
+            prev_point = ordered_obstacle_outlines.back().front().points.back();
         }
     }
 
@@ -554,105 +630,8 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     // this is intentional, because then it's easier to find good traversal points.
     // In order to make the mower approach the obstacle, we will reverse the path later.
     for (auto &group: ordered_obstacle_outlines) {
-        slic3r_coverage_planner::Path path;
-        path.is_outline = true;
-        path.path.header = header;
-        for (int i = 0; i < group.size(); i++) {
-            auto &poly = group[i];
-
-
-            // Find an appropriate point to split, this should be close to the last split point,
-            // so that we don't need to traverse a lot.
-            Polyline line;
-            if (i == 0) {
-                // innermost group, split wherever
-                line = poly.split_at_first_point();
-            } else {
-                // Get last point of last group. this is the next inner poly from this point of view
-                const auto &last_pose = path.path.poses.back();
-                // Find the closest point in the current poly and split there
-                double min_distance = INFINITY;
-                int min_split_index = 0;
-                for (int split_index = 0; split_index < poly.points.size(); ++split_index) {
-                    const auto &pt = poly.points[split_index];
-                    const auto pt_x = unscale(pt.x);
-                    const auto pt_y = unscale(pt.y);
-                    double distance = sqrt((pt_x - last_pose.pose.position.x) * (pt_x - last_pose.pose.position.x) +
-                                           (pt_y - last_pose.pose.position.y) * (pt_y - last_pose.pose.position.y));
-
-                    if (distance < min_distance) {
-                        min_distance = distance;
-                        min_split_index = split_index;
-                    }
-                }
-
-                // In order to smooth the transition we skip some points (think spiral movement of the mower).
-                // Check, that the skip did not break the path (cross the outer poly during transition).
-                // If it's fine, use the smoothed path, otherwise use the shortest point to split.
-                int smooth_split_index = (min_split_index + 2) % poly.points.size();
-
-                line = poly.split_at_index(smooth_split_index);
-                const Polygon *next_outer_poly;
-                if (i < group.size() - 1) {
-                    next_outer_poly = &group[i + 1];
-                } else {
-                    // we are in the outermost line, use outline for collision check
-                    next_outer_poly = &outline_poly;
-                }
-                Line connection(line.first_point(),
-                                Point(scale_(last_pose.pose.position.x), scale_(last_pose.pose.position.y)));
-                Point intersection_pt{};
-                if (next_outer_poly->intersection(connection, &intersection_pt)) {
-                    // intersection, we need to split at closest point
-                    line = poly.split_at_index(min_split_index);
-                }
-            }
-            line.remove_duplicate_points();
-
-
-            auto equally_spaced_points = line.equally_spaced_points(scale_(0.1));
-            if (equally_spaced_points.size() < 2) {
-                ROS_INFO("Skipping single dot");
-                continue;
-            }
-            ROS_INFO_STREAM("Got " << equally_spaced_points.size() << " points");
-
-            Point *lastPoint = nullptr;
-            for (auto &pt: equally_spaced_points) {
-                if (lastPoint == nullptr) {
-                    lastPoint = &pt;
-                    continue;
-                }
-
-                // calculate pose for "lastPoint" pointing to current point
-
-                // Direction needs to be inversed compared to outline, because we will reverse the point order later.
-                auto dir = *lastPoint - pt;
-                double orientation = atan2(dir.y, dir.x);
-                tf2::Quaternion q(0.0, 0.0, orientation);
-
-                geometry_msgs::PoseStamped pose;
-                pose.header = header;
-                pose.pose.orientation = tf2::toMsg(q);
-                pose.pose.position.x = unscale(lastPoint->x);
-                pose.pose.position.y = unscale(lastPoint->y);
-                pose.pose.position.z = 0;
-                path.path.poses.push_back(pose);
-                lastPoint = &pt;
-            }
-
-            // finally, we add the final pose for "lastPoint" with the same orientation as the last poe
-            geometry_msgs::PoseStamped pose;
-            pose.header = header;
-            pose.pose.orientation = path.path.poses.back().pose.orientation;
-            pose.pose.position.x = unscale(lastPoint->x);
-            pose.pose.position.y = unscale(lastPoint->y);
-            pose.pose.position.z = 0;
-            path.path.poses.push_back(pose);
-
-        }
-        // Reverse here to make the mower approach the obstacle instead of starting close to the obstacle
-        std::reverse(path.path.poses.begin(), path.path.poses.end());
+        areaLastPointValid = false;
+        auto path = determinePathForOutline(header, outline_poly, group, true, start_point, &areaLastPoint, &areaLastPointValid);
         res.paths.push_back(path);
     }
 
@@ -664,8 +643,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
         line.remove_duplicate_points();
 
-
-        auto equally_spaced_points = line.equally_spaced_points(scale_(0.1));
+        auto equally_spaced_points = line.equally_spaced_points(scale_(DEF_POINT_SPACING));
         if (equally_spaced_points.size() < 2) {
             ROS_INFO("Skipping single dot");
             continue;
@@ -739,6 +717,19 @@ int main(int argc, char **argv) {
     if (visualize_plan) {
         marker_array_publisher = n.advertise<visualization_msgs::MarkerArray>(
                 "slic3r_coverage_planner/path_marker_array", 100, true);
+    }
+
+    if(!paramNh.getParam("transition_distance_m",transition_distance_m)) {
+        double wheel_distance_m = 0.0;
+        if(paramNh.getParam("wheel_distance_m",wheel_distance_m)) {
+            transition_distance_m = 3 * wheel_distance_m;
+        } else {
+            transition_distance_m = 3 * 0.325;
+        }
+    }
+
+    if(!paramNh.getParam("use_linear_transition",use_linear_transition)) {
+        use_linear_transition = false;
     }
 
     ros::ServiceServer plan_path_srv = n.advertiseService("slic3r_coverage_planner/plan_path", planPath);
