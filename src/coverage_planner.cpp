@@ -211,7 +211,7 @@ void traverse_from_right(std::vector<PerimeterGeneratorLoop> &contours, std::vec
     }
 }
 
-slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, Slic3r::Polygon &outline_poly, Slic3r::Polygons &group, bool isObstacle, Point *areaLastPoint) {
+slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, Slic3r::Polygon &outline_poly, Slic3r::Polygons &group, bool isObstacle, Point *areaLastPoint, double transition_distance) {
     slic3r_coverage_planner::Path path;
     path.is_outline = true;
     path.path.header = header;
@@ -250,7 +250,13 @@ slic3r_coverage_planner::Path determinePathForOutline(std_msgs::Header &header, 
             // In order to smooth the transition we skip some points (think spiral movement of the mower).
             // Check, that the skip did not break the path (cross the outer poly during transition).
             // If it's fine, use the smoothed path, otherwise use the shortest point to split.
-            int smooth_transition_idx = (closest_idx + 3) % points.size();
+            int smooth_transition_idx = closest_idx;
+            double cur_transition_distance = 0;
+            while (cur_transition_distance < scale_(transition_distance)) {
+                int prev = smooth_transition_idx;
+                smooth_transition_idx = (smooth_transition_idx + 1) % points.size();
+                cur_transition_distance += points[prev].distance_to(points[smooth_transition_idx]);
+            }
 
             const Polygon *next_outer_poly;
             if (i < group.size() - 1) {
@@ -536,9 +542,9 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         delete fill;
         fill = nullptr;
 
-        ROS_INFO_STREAM("Fill Complete. Polyline count: " << lines.size());
-        for (int i = 0; i < lines.size(); i++) {
-            ROS_INFO_STREAM("Polyline " << i << " has point count: " << lines[i].points.size());
+        ROS_INFO_STREAM("Fill Complete. Polyline count: " << fill_lines.size());
+        for (int i = 0; i < fill_lines.size(); i++) {
+            ROS_INFO_STREAM("Polyline " << i << " has point count: " << fill_lines[i].points.size());
         }
     }
 
@@ -558,7 +564,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
     Point areaLastPoint;
     for (auto &group: area_outlines) {
-        auto path = determinePathForOutline(header, outline_poly, group, false, &areaLastPoint);
+        auto path = determinePathForOutline(header, outline_poly, group, false, &areaLastPoint, req.distance * 3);
         // Rotate last point 90 degrees
         {
             tf2::Quaternion q_orig, q_rot, q_new;
@@ -609,7 +615,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     // In order to make the mower approach the obstacle, we will reverse the path later.
     for (auto &group: ordered_obstacle_outlines) {
         // Reverse here to make the mower approach the obstacle instead of starting close to the obstacle
-        auto path = determinePathForOutline(header, outline_poly, group, true, nullptr);
+        auto path = determinePathForOutline(header, outline_poly, group, true, nullptr, req.distance * 3);
         std::reverse(path.path.poses.begin(), path.path.poses.end());
         // Rotate last point 90 degrees
         {
