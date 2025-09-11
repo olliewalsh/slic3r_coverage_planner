@@ -24,6 +24,18 @@
 #include "ExtrusionEntityCollection.hpp"
 
 
+class Linear : public FillRectilinear
+{
+public:
+    void fill_single_direction(ExPolygon expolygon, const direction_t &direction,
+	    coord_t x_shift, Polylines* out) {
+            return this->_fill_single_direction(expolygon, direction, x_shift, out);
+        }
+    direction_t infill_direction(const Surface &surface) const {
+        return this->_infill_direction(surface);
+    }
+};
+
 bool visualize_plan;
 ros::Publisher marker_array_publisher;
 
@@ -528,7 +540,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         fill->angle = req.angle;
         fill->z = scale_(1.0);
         fill->endpoints_overlap = 0;
-        fill->density = 1.0;
+        fill->density = 1.0 / req.fill_step;
         fill->dont_connect = false;
         fill->dont_adjust = true;
         fill->min_spacing = req.distance;
@@ -537,8 +549,23 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
         ROS_INFO_STREAM("Starting Fill. Poly size:" << surface.expolygon.contour.points.size());
 
-        Slic3r::Polylines lines = fill->fill_surface(surface);
-        append_to(fill_lines, lines);
+
+        {
+            ExPolygons expp = offset_ex(surface.expolygon, -scale_(req.distance)/2);
+
+
+            for (int j=0; j < req.fill_step; j++) {
+                for (size_t i = 0; i < expp.size(); ++i) {
+                    ((Linear*)fill)->fill_single_direction(
+                        expp[i],
+                        ((Linear*)fill)->infill_direction(surface),
+                        scale_(req.distance*j),
+                        &fill_lines
+                    );
+                }
+            }
+        }
+
         delete fill;
         fill = nullptr;
 
@@ -583,30 +610,20 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     if (obstacle_outlines.size() > 0) {
         // If no prev point set to the first point in first obstacle
         // Note: back() polygon is the first (outer) loop
-        auto prev_point = area_outlines.size() > 0 ? &areaLastPoint :
-            &obstacle_outlines.front().back().points.front();
+        auto prev_point = area_outlines.size() > 0 ? areaLastPoint :
+            obstacle_outlines.front().back().first_point();
 
         while (obstacle_outlines.size()) {
             // Sort be desc distance then pop closest outline from the back of the vector
             std::sort(obstacle_outlines.begin(), obstacle_outlines.end(),
                       [prev_point](Slic3r::Polygons &a, Slic3r::Polygons &b) {
                           // Note: back() polygon is the first (outer) loop
-                          auto a_firstPoint = a.back().points.front();
-                          double distance_a = sqrt(
-                                  (a_firstPoint.x - prev_point->x) * (a_firstPoint.x - prev_point->x) +
-                                  (a_firstPoint.y - prev_point->y) * (a_firstPoint.y - prev_point->y)
-                          );
-                          auto b_firstPoint = b.back().points.front();
-                          double distance_b = sqrt(
-                                  (b_firstPoint.x - prev_point->x) * (b_firstPoint.x - prev_point->x) +
-                                  (b_firstPoint.y - prev_point->y) * (b_firstPoint.y - prev_point->y)
-                          );
-                          return distance_a >= distance_b;
+                          return b.back().first_point().distance_to(prev_point) < a.back().first_point().distance_to(prev_point);
                       });
             ordered_obstacle_outlines.push_back(obstacle_outlines.back());
             obstacle_outlines.pop_back();
             // Note: front() polygon is the last (inner) loop
-            prev_point = &ordered_obstacle_outlines.back().front().points.back();
+            prev_point = ordered_obstacle_outlines.back().front().last_point();
         }
     }
 
@@ -629,11 +646,30 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
         res.paths.push_back(path);
     }
 
+    Polylines ordered_fill_lines;
+    if (fill_lines.size() > 0) {
+        // If no prev point set to the first point in first fill line
+        auto prev_point = ordered_obstacle_outlines.size() ? ordered_obstacle_outlines.back().front().last_point() :
+                          area_outlines.size() > 0 ? areaLastPoint :
+                          fill_lines.front().first_point();
+        while (fill_lines.size()) {
+            // Sort be desc distance then pop closest outline from the back of the vector
+            std::sort(fill_lines.begin(), fill_lines.end(),
+                      [prev_point](Polyline &a, Polyline &b) {
+                          auto a_firstPoint = a.first_point();
+                          auto b_firstPoint = b.first_point();
+                          return b.first_point().distance_to(prev_point) < a.first_point().distance_to(prev_point);
+                     });
+            ordered_fill_lines.push_back(fill_lines.back());
+            fill_lines.pop_back();
+            prev_point = ordered_fill_lines.back().points.back();
+        }
+    }
+
     double smooth_clip_first_pass = int(950.0*req.distance/3.0)/1000.0;
     double smooth_clip_second_pass = int(950.0*req.distance/9.0)/1000.0;
 
-    for (int i = 0; i < fill_lines.size(); i++) {
-        auto &line = fill_lines[i];
+    for (auto &line : ordered_fill_lines) {
         slic3r_coverage_planner::Path path;
         path.is_outline = false;
         path.path.header = header;
