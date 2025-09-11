@@ -551,7 +551,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
 
         {
-            ExPolygons expp = offset_ex(surface.expolygon, -scale_(req.distance)/2);
+            ExPolygons expp = offset_ex(surface.expolygon, req.outline_overlap_count ? -3*scale_(req.distance)/4 : -scale_(req.distance)/2);
 
 
             for (int j=0; j < req.fill_step; j++) {
