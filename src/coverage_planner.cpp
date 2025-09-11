@@ -400,7 +400,7 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
     // Results are stored here
     std::vector<Polygons> area_outlines;
-    Polylines fill_lines;
+    std::vector<Polylines> fill_lines;
     std::vector<Polygons> obstacle_outlines;
 
 
@@ -555,23 +555,28 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
 
 
             for (int j=0; j < req.fill_step; j++) {
+                Polylines step_fill_lines;
                 for (size_t i = 0; i < expp.size(); ++i) {
                     ((Linear*)fill)->fill_single_direction(
                         expp[i],
                         ((Linear*)fill)->infill_direction(surface),
                         scale_(req.distance*j),
-                        &fill_lines
+                        &step_fill_lines
                     );
                 }
+                fill_lines.push_back(step_fill_lines);
             }
         }
 
         delete fill;
         fill = nullptr;
 
-        ROS_INFO_STREAM("Fill Complete. Polyline count: " << fill_lines.size());
-        for (int i = 0; i < fill_lines.size(); i++) {
-            ROS_INFO_STREAM("Polyline " << i << " has point count: " << fill_lines[i].points.size());
+        ROS_INFO_STREAM("Fill Complete");
+        for (int j = 0; j < fill_lines.size(); j++) {
+            ROS_INFO_STREAM("Step " << j << " Polyline count: " << fill_lines[j].size());
+            for (int i = 0; i < fill_lines[j].size(); i++) {
+                ROS_INFO_STREAM("Step " << j << " Polyline " << i << " has point count: " << fill_lines[j][i].points.size());
+            }
         }
     }
 
@@ -647,29 +652,35 @@ bool planPath(slic3r_coverage_planner::PlanPathRequest &req, slic3r_coverage_pla
     }
 
     Polylines ordered_fill_lines;
-    if (fill_lines.size() > 0) {
+
+    if(fill_lines.size() and fill_lines[0].size()) {
         // If no prev point set to the first point in first fill line
         auto prev_point = ordered_obstacle_outlines.size() ? ordered_obstacle_outlines.back().front().last_point() :
-                          area_outlines.size() > 0 ? areaLastPoint :
-                          fill_lines.front().first_point();
-        while (fill_lines.size()) {
-            // Sort be desc distance then pop closest outline from the back of the vector
-            std::sort(fill_lines.begin(), fill_lines.end(),
-                      [prev_point](Polyline &a, Polyline &b) {
-                          auto a_firstPoint = a.first_point();
-                          auto b_firstPoint = b.first_point();
-                          return b.first_point().distance_to(prev_point) < a.first_point().distance_to(prev_point);
-                     });
-            ordered_fill_lines.push_back(fill_lines.back());
+            area_outlines.size() ? areaLastPoint :
+            fill_lines.front().front().first_point();
+        std::reverse(fill_lines.begin(), fill_lines.end());
+        while(fill_lines.size()) {
+            auto step_lines = fill_lines.back();
+            while (step_lines.size()) {
+                // Sort be desc distance then pop closest outline from the back of the vector
+                std::sort(step_lines.begin(), step_lines.end(),
+                    [prev_point](Polyline &a, Polyline &b) {
+                        auto a_firstPoint = a.first_point();
+                        auto b_firstPoint = b.first_point();
+                        return b.first_point().distance_to(prev_point) < a.first_point().distance_to(prev_point);
+                    });
+                ordered_fill_lines.push_back(step_lines.back());
+                step_lines.pop_back();
+                prev_point = ordered_fill_lines.back().last_point();
+            }
             fill_lines.pop_back();
-            prev_point = ordered_fill_lines.back().points.back();
         }
     }
 
     double smooth_clip_first_pass = int(950.0*req.distance/3.0)/1000.0;
     double smooth_clip_second_pass = int(950.0*req.distance/9.0)/1000.0;
 
-    for (auto &line : ordered_fill_lines) {
+    for( auto &line : ordered_fill_lines) {
         slic3r_coverage_planner::Path path;
         path.is_outline = false;
         path.path.header = header;
